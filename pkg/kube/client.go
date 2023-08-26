@@ -132,6 +132,9 @@ func (c *Client) IsReachable() error {
 // Create creates Kubernetes resources specified in the resource list.
 func (c *Client) Create(resources ResourceList) (*Result, error) {
 	c.Log("creating %d resource(s)", len(resources))
+	for _, resource := range resources {
+		c.Log("Creating %s %s/%s...", resource.Mapping.GroupVersionKind.Kind, resource.Namespace, resource.Name)
+	}
 	if err := perform(resources, createResource); err != nil {
 		return nil, err
 	}
@@ -398,12 +401,13 @@ func (c *Client) Update(original, target ResourceList, force bool) (*Result, err
 			res.Created = append(res.Created, info)
 
 			// Since the resource does not exist, create it.
+			kind := info.Mapping.GroupVersionKind.Kind
+			c.Log("Creating %s %s/%s", kind, info.Namespace, info.Name)
 			if err := createResource(info); err != nil {
 				return errors.Wrap(err, "failed to create resource")
 			}
 
-			kind := info.Mapping.GroupVersionKind.Kind
-			c.Log("Created a new %s called %q in %s\n", kind, info.Name, info.Namespace)
+			c.Log("Created %s %s/%s", kind, info.Namespace, info.Name)
 			return nil
 		}
 
@@ -431,7 +435,7 @@ func (c *Client) Update(original, target ResourceList, force bool) (*Result, err
 	}
 
 	for _, info := range original.Difference(target) {
-		c.Log("Deleting %s %q in namespace %s...", info.Mapping.GroupVersionKind.Kind, info.Name, info.Namespace)
+		c.Log("Deleting %s %s/%s", info.Mapping.GroupVersionKind.Kind, info.Namespace, info.Name)
 
 		if err := info.Get(); err != nil {
 			c.Log("Unable to get obj %q, err: %s", info.Name, err)
@@ -475,11 +479,11 @@ func delete(c *Client, resources ResourceList, propagation metav1.DeletionPropag
 	res := &Result{}
 	mtx := sync.Mutex{}
 	err := perform(resources, func(info *resource.Info) error {
-		c.Log("Starting delete for %q %s", info.Name, info.Mapping.GroupVersionKind.Kind)
+		c.Log("Deleting %s %s/%s", info.Mapping.GroupVersionKind.Kind, info.Namespace, info.Name)
 		err := deleteResource(info, propagation)
 		if err == nil || apierrors.IsNotFound(err) {
 			if err != nil {
-				c.Log("Ignoring delete failure for %q %s: %v", info.Name, info.Mapping.GroupVersionKind, err)
+				c.Log("Ignoring delete failure for %s %q in namespace %s: %v", info.Mapping.GroupVersionKind.Kind, info.Name, info.Namespace, err)
 			}
 			mtx.Lock()
 			defer mtx.Unlock()
@@ -682,7 +686,7 @@ func updateResource(c *Client, target *resource.Info, currentObj runtime.Object,
 			return nil
 		}
 		// send patch to server
-		c.Log("Patch %s %q in namespace %s", kind, target.Name, target.Namespace)
+		c.Log("Patching %s %s/%s", kind, target.Namespace, target.Name)
 		obj, err = helper.Patch(target.Namespace, target.Name, patchType, patch, nil)
 		if err != nil {
 			return errors.Wrapf(err, "cannot patch %q with kind %s", target.Name, kind)
