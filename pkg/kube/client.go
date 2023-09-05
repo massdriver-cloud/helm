@@ -677,7 +677,7 @@ func updateResource(c *Client, target *resource.Info, currentObj runtime.Object,
 		}
 
 		if patch == nil || string(patch) == "{}" {
-			c.Log("Looks like there are no changes for %s %q", kind, target.Name)
+			c.Log("Looks like there are no changes for %s %s/%s", kind, target.Namespace, target.Name)
 			// This needs to happen to make sure that Helm has the latest info from the API
 			// Otherwise there will be no labels and other functions that use labels will panic
 			if err := target.Get(); err != nil {
