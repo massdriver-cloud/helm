@@ -19,6 +19,7 @@ package driver // import "helm.sh/helm/v3/pkg/storage/driver"
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -94,8 +95,42 @@ func (s *SQL) Name() string {
 	return SQLDriverName
 }
 
+// Check if all migrations al
+func (s *SQL) checkAlreadyApplied(migrations []*migrate.Migration) bool {
+	// make map (set) of ids for fast search
+	migrationsIds := make(map[string]struct{})
+	for _, migration := range migrations {
+		migrationsIds[migration.Id] = struct{}{}
+	}
+
+	// get list of applied migrations
+	migrate.SetDisableCreateTable(true)
+	records, err := migrate.GetMigrationRecords(s.db.DB, postgreSQLDialect)
+	migrate.SetDisableCreateTable(false)
+	if err != nil {
+		s.Log("checkAlreadyApplied: failed to get migration records: %v", err)
+		return false
+	}
+
+	for _, record := range records {
+		if _, ok := migrationsIds[record.Id]; ok {
+			s.Log("checkAlreadyApplied: found previous migration (Id: %v) applied at %v", record.Id, record.AppliedAt)
+			delete(migrationsIds, record.Id)
+		}
+	}
+
+	// check if all migrations appliyed
+	if len(migrationsIds) != 0 {
+		for id := range migrationsIds {
+			s.Log("checkAlreadyApplied: find unapplied migration (id: %v)", id)
+		}
+		return false
+	}
+	return true
+}
+
 func (s *SQL) ensureDBSetup() error {
-	// Populate the database with the relations we need if they don't exist yet
+
 	migrations := &migrate.MemoryMigrationSource{
 		Migrations: []*migrate.Migration{
 			{
@@ -103,7 +138,7 @@ func (s *SQL) ensureDBSetup() error {
 				Up: []string{
 					fmt.Sprintf(`
 						CREATE TABLE %s (
-							%s VARCHAR(67),
+							%s VARCHAR(90),
 							%s VARCHAR(64) NOT NULL,
 							%s TEXT NOT NULL,
 							%s VARCHAR(64) NOT NULL,
@@ -121,9 +156,9 @@ func (s *SQL) ensureDBSetup() error {
 						CREATE INDEX ON %s (%s);
 						CREATE INDEX ON %s (%s);
 						CREATE INDEX ON %s (%s);
-						
+	
 						GRANT ALL ON %s TO PUBLIC;
-
+	
 						ALTER TABLE %s ENABLE ROW LEVEL SECURITY;
 					`,
 						sqlReleaseTableName,
@@ -200,6 +235,12 @@ func (s *SQL) ensureDBSetup() error {
 		},
 	}
 
+	// Check that init migration already applied
+	if s.checkAlreadyApplied(migrations.Migrations) {
+		return nil
+	}
+
+	// Populate the database with the relations we need if they don't exist yet
 	_, err := migrate.Exec(s.db.DB, postgreSQLDialect, migrations, migrate.Up)
 	return err
 }
@@ -327,6 +368,9 @@ func (s *SQL) List(filter func(*rspb.Release) bool) ([]*rspb.Release, error) {
 		if release.Labels, err = s.getReleaseCustomLabels(record.Key, record.Namespace); err != nil {
 			s.Log("failed to get release %s/%s custom labels: %v", record.Namespace, record.Key, err)
 			return nil, err
+		}
+		for k, v := range getReleaseSystemLabels(release) {
+			release.Labels[k] = v
 		}
 
 		if filter(release) {
@@ -640,4 +684,14 @@ func (s *SQL) getReleaseCustomLabels(key string, namespace string) (map[string]s
 	}
 
 	return filterSystemLabels(labelsMap), nil
+}
+
+// Rebuild system labels from release object
+func getReleaseSystemLabels(rls *rspb.Release) map[string]string {
+	return map[string]string{
+		"name":    rls.Name,
+		"owner":   sqlReleaseDefaultOwner,
+		"status":  rls.Info.Status.String(),
+		"version": strconv.Itoa(rls.Version),
+	}
 }

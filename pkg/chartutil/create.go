@@ -310,8 +310,8 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       labels:
-        {{- include "<CHARTNAME>.selectorLabels" . | nindent 8 }}
-	{{- with .Values.podLabels }}
+        {{- include "<CHARTNAME>.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
@@ -392,7 +392,7 @@ metadata:
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}
-  automountServiceAccountToken: {{ .Values.serviceAccount.automount }}
+automountServiceAccountToken: {{ .Values.serviceAccount.automount }}
 {{- end }}
 `
 
