@@ -62,8 +62,9 @@ func CheckJobs(checkJobs bool) ReadyCheckerOption {
 // be used to override defaults.
 func NewReadyChecker(cl kubernetes.Interface, log func(string, ...interface{}), opts ...ReadyCheckerOption) ReadyChecker {
 	c := ReadyChecker{
-		client: cl,
-		log:    log,
+		client:         cl,
+		log:            log,
+		readyResources: make(map[string]bool),
 	}
 	if c.log == nil {
 		c.log = nopLogger
