@@ -76,10 +76,11 @@ func NewReadyChecker(cl kubernetes.Interface, log func(string, ...interface{}), 
 
 // ReadyChecker is a type that can check core Kubernetes types for readiness.
 type ReadyChecker struct {
-	client        kubernetes.Interface
-	log           func(string, ...interface{})
-	checkJobs     bool
-	pausedAsReady bool
+	client         kubernetes.Interface
+	log            func(string, ...interface{})
+	checkJobs      bool
+	pausedAsReady  bool
+	readyResources map[string]bool
 }
 
 // IsReady checks if v is ready. It supports checking readiness for pods,
@@ -97,6 +98,12 @@ func (c *ReadyChecker) IsReady(ctx context.Context, v *resource.Info) (bool, err
 		ok  = true
 		err error
 	)
+
+	// Skip any resources previously marked as ready
+	if _, exists := c.readyResources[objectKey(v)]; exists {
+		return true, nil
+	}
+
 	switch value := AsVersioned(v).(type) {
 	case *corev1.Pod:
 		pod, err := c.client.CoreV1().Pods(v.Namespace).Get(ctx, v.Name, metav1.GetOptions{})
@@ -184,7 +191,9 @@ func (c *ReadyChecker) IsReady(ctx context.Context, v *resource.Info) (bool, err
 			return false, nil
 		}
 	case *corev1.ReplicationController, *extensionsv1beta1.ReplicaSet, *appsv1beta2.ReplicaSet, *appsv1.ReplicaSet:
-		ok, err = c.podsReadyForObject(ctx, v.Namespace, value)
+		return c.podsReadyForObject(ctx, v.Namespace, value)
+	default:
+		c.log("Status %s is ready: %s/%s", v.Mapping.GroupVersionKind.Kind, v.Namespace, v.Name)
 	}
 	if !ok || err != nil {
 		return false, err
@@ -216,37 +225,40 @@ func (c *ReadyChecker) podsforObject(ctx context.Context, namespace string, obj 
 
 // isPodReady returns true if a pod is ready; false otherwise.
 func (c *ReadyChecker) isPodReady(pod *corev1.Pod) bool {
-	for _, c := range pod.Status.Conditions {
-		if c.Type == corev1.PodReady && c.Status == corev1.ConditionTrue {
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
+			c.log("Status Pod is ready: %s/%s", pod.GetNamespace(), pod.GetName())
 			return true
 		}
 	}
-	c.log("Pod is not ready: %s/%s", pod.GetNamespace(), pod.GetName())
+	c.log("Status Pod is not ready: %s/%s", pod.GetNamespace(), pod.GetName())
 	return false
 }
 
 func (c *ReadyChecker) jobReady(job *batchv1.Job) (bool, error) {
 	if job.Status.Failed > *job.Spec.BackoffLimit {
-		c.log("Job is failed: %s/%s", job.GetNamespace(), job.GetName())
+		c.log("Status Job is failed: %s/%s", job.GetNamespace(), job.GetName())
 		// If a job is failed, it can't recover, so throw an error
 		return false, fmt.Errorf("job is failed: %s/%s", job.GetNamespace(), job.GetName())
 	}
 	if job.Spec.Completions != nil && job.Status.Succeeded < *job.Spec.Completions {
-		c.log("Job is not completed: %s/%s", job.GetNamespace(), job.GetName())
+		c.log("Status Job is not completed: %s/%s", job.GetNamespace(), job.GetName())
 		return false, nil
 	}
+	c.log("Status Job is completed: %s/%s", job.GetNamespace(), job.GetName())
 	return true, nil
 }
 
 func (c *ReadyChecker) serviceReady(s *corev1.Service) bool {
 	// ExternalName Services are external to cluster so helm shouldn't be checking to see if they're 'ready' (i.e. have an IP Set)
 	if s.Spec.Type == corev1.ServiceTypeExternalName {
+		c.log("Status Service is ready: %s/%s (external service)", s.GetNamespace(), s.GetName())
 		return true
 	}
 
 	// Ensure that the service cluster IP is not empty
 	if s.Spec.ClusterIP == "" {
-		c.log("Service does not have cluster IP address: %s/%s", s.GetNamespace(), s.GetName())
+		c.log("Status Service is not ready: %s/%s (does not have cluster IP address)", s.GetNamespace(), s.GetName())
 		return false
 	}
 
@@ -254,45 +266,49 @@ func (c *ReadyChecker) serviceReady(s *corev1.Service) bool {
 	if s.Spec.Type == corev1.ServiceTypeLoadBalancer {
 		// do not wait when at least 1 external IP is set
 		if len(s.Spec.ExternalIPs) > 0 {
-			c.log("Service %s/%s has external IP addresses (%v), marking as ready", s.GetNamespace(), s.GetName(), s.Spec.ExternalIPs)
+			c.log("Status Service is ready: %s/%s (has external IP addresses %v)", s.GetNamespace(), s.GetName(), s.Spec.ExternalIPs)
 			return true
 		}
 
 		if s.Status.LoadBalancer.Ingress == nil {
-			c.log("Service does not have load balancer ingress IP address: %s/%s", s.GetNamespace(), s.GetName())
+			c.log("Status Service is not ready: %s/%s (does not have load balancer ingress IP address)", s.GetNamespace(), s.GetName())
 			return false
 		}
 	}
 
+	c.log("Status Service is ready: %s/%s", s.GetNamespace(), s.GetName())
 	return true
 }
 
 func (c *ReadyChecker) volumeReady(v *corev1.PersistentVolumeClaim) bool {
 	if v.Status.Phase != corev1.ClaimBound {
-		c.log("PersistentVolumeClaim is not bound: %s/%s", v.GetNamespace(), v.GetName())
+		c.log("Status PersistentVolumeClaim is not ready: %s/%s (not bound)", v.GetNamespace(), v.GetName())
 		return false
 	}
+	c.log("Status PersistentVolumeClaim is ready: %s/%s", v.GetNamespace(), v.GetName())
 	return true
 }
 
 func (c *ReadyChecker) deploymentReady(rs *appsv1.ReplicaSet, dep *appsv1.Deployment) bool {
 	expectedReady := *dep.Spec.Replicas - deploymentutil.MaxUnavailable(*dep)
 	if !(rs.Status.ReadyReplicas >= expectedReady) {
-		c.log("Deployment is not ready: %s/%s. %d out of %d expected pods are ready", dep.Namespace, dep.Name, rs.Status.ReadyReplicas, expectedReady)
+		c.log("Status Deployment is not ready: %s/%s (%d out of %d expected pods are ready)", dep.Namespace, dep.Name, rs.Status.ReadyReplicas, expectedReady)
 		return false
 	}
+	c.log("Status Deployment is ready: %s/%s", dep.Namespace, dep.Name)
 	return true
 }
 
 func (c *ReadyChecker) daemonSetReady(ds *appsv1.DaemonSet) bool {
 	// If the update strategy is not a rolling update, there will be nothing to wait for
 	if ds.Spec.UpdateStrategy.Type != appsv1.RollingUpdateDaemonSetStrategyType {
+		c.log("Status DaemonSet is ready: %s/%s", ds.Namespace, ds.Name)
 		return true
 	}
 
 	// Make sure all the updated pods have been scheduled
 	if ds.Status.UpdatedNumberScheduled != ds.Status.DesiredNumberScheduled {
-		c.log("DaemonSet is not ready: %s/%s. %d out of %d expected pods have been scheduled", ds.Namespace, ds.Name, ds.Status.UpdatedNumberScheduled, ds.Status.DesiredNumberScheduled)
+		c.log("Status DaemonSet is not ready: %s/%s (%d out of %d expected pods have been scheduled)", ds.Namespace, ds.Name, ds.Status.UpdatedNumberScheduled, ds.Status.DesiredNumberScheduled)
 		return false
 	}
 	maxUnavailable, err := intstr.GetScaledValueFromIntOrPercent(ds.Spec.UpdateStrategy.RollingUpdate.MaxUnavailable, int(ds.Status.DesiredNumberScheduled), true)
@@ -305,9 +321,10 @@ func (c *ReadyChecker) daemonSetReady(ds *appsv1.DaemonSet) bool {
 
 	expectedReady := int(ds.Status.DesiredNumberScheduled) - maxUnavailable
 	if !(int(ds.Status.NumberReady) >= expectedReady) {
-		c.log("DaemonSet is not ready: %s/%s. %d out of %d expected pods are ready", ds.Namespace, ds.Name, ds.Status.NumberReady, expectedReady)
+		c.log("Status DaemonSet is not ready: %s/%s (%d out of %d expected pods are ready)", ds.Namespace, ds.Name, ds.Status.NumberReady, expectedReady)
 		return false
 	}
+	c.log("Status DaemonSet is ready: %s/%s", ds.Namespace, ds.Name)
 	return true
 }
 
@@ -357,13 +374,13 @@ func (c *ReadyChecker) crdReady(crd apiextv1.CustomResourceDefinition) bool {
 func (c *ReadyChecker) statefulSetReady(sts *appsv1.StatefulSet) bool {
 	// If the update strategy is not a rolling update, there will be nothing to wait for
 	if sts.Spec.UpdateStrategy.Type != appsv1.RollingUpdateStatefulSetStrategyType {
-		c.log("StatefulSet skipped ready check: %s/%s. updateStrategy is %v", sts.Namespace, sts.Name, sts.Spec.UpdateStrategy.Type)
+		c.log("Status StatefulSet is ready: %s/%s (skipped ready check, updateStrategy is %v)", sts.Namespace, sts.Name, sts.Spec.UpdateStrategy.Type)
 		return true
 	}
 
 	// Make sure the status is up-to-date with the StatefulSet changes
 	if sts.Status.ObservedGeneration < sts.Generation {
-		c.log("StatefulSet is not ready: %s/%s. update has not yet been observed", sts.Namespace, sts.Name)
+		c.log("Status StatefulSet is not ready: %s/%s (update has not yet been observed)", sts.Namespace, sts.Name)
 		return false
 	}
 
@@ -389,23 +406,23 @@ func (c *ReadyChecker) statefulSetReady(sts *appsv1.StatefulSet) bool {
 
 	// Make sure all the updated pods have been scheduled
 	if int(sts.Status.UpdatedReplicas) < expectedReplicas {
-		c.log("StatefulSet is not ready: %s/%s. %d out of %d expected pods have been scheduled", sts.Namespace, sts.Name, sts.Status.UpdatedReplicas, expectedReplicas)
+		c.log("Status StatefulSet is not ready: %s/%s (%d out of %d expected pods have been scheduled)", sts.Namespace, sts.Name, sts.Status.UpdatedReplicas, expectedReplicas)
 		return false
 	}
 
 	if int(sts.Status.ReadyReplicas) != replicas {
-		c.log("StatefulSet is not ready: %s/%s. %d out of %d expected pods are ready", sts.Namespace, sts.Name, sts.Status.ReadyReplicas, replicas)
+		c.log("Status StatefulSet is not ready: %s/%s (%d out of %d expected pods are ready)", sts.Namespace, sts.Name, sts.Status.ReadyReplicas, replicas)
 		return false
 	}
 	// This check only makes sense when all partitions are being upgraded otherwise during a
 	// partioned rolling upgrade, this condition will never evaluate to true, leading to
 	// error.
 	if partition == 0 && sts.Status.CurrentRevision != sts.Status.UpdateRevision {
-		c.log("StatefulSet is not ready: %s/%s. currentRevision %s does not yet match updateRevision %s", sts.Namespace, sts.Name, sts.Status.CurrentRevision, sts.Status.UpdateRevision)
+		c.log("Status StatefulSet is not ready: %s/%s (currentRevision %s does not yet match updateRevision %s)", sts.Namespace, sts.Name, sts.Status.CurrentRevision, sts.Status.UpdateRevision)
 		return false
 	}
 
-	c.log("StatefulSet is ready: %s/%s. %d out of %d expected pods are ready", sts.Namespace, sts.Name, sts.Status.ReadyReplicas, replicas)
+	c.log("Status StatefulSet is ready: %s/%s", sts.Namespace, sts.Name)
 	return true
 }
 
@@ -414,4 +431,9 @@ func getPods(ctx context.Context, client kubernetes.Interface, namespace, select
 		LabelSelector: selector,
 	})
 	return list.Items, err
+}
+
+func objectKey(r *resource.Info) string {
+	gvk := r.Object.GetObjectKind().GroupVersionKind()
+	return fmt.Sprintf("%s/%s/%s/%s", gvk.GroupVersion().String(), gvk.Kind, r.Namespace, r.Name)
 }
