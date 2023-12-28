@@ -483,7 +483,7 @@ func delete(c *Client, resources ResourceList, propagation metav1.DeletionPropag
 		err := deleteResource(info, propagation)
 		if err == nil || apierrors.IsNotFound(err) {
 			if err != nil {
-				c.Log("Ignoring delete failure for %s %q in namespace %s: %v", info.Mapping.GroupVersionKind.Kind, info.Name, info.Namespace, err)
+				c.Log("Ignoring delete failure for %s %s/%s: %v", info.Mapping.GroupVersionKind.Kind, info.Namespace, info.Name, err)
 			}
 			mtx.Lock()
 			defer mtx.Unlock()

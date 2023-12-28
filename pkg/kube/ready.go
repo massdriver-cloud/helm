@@ -80,7 +80,7 @@ type ReadyChecker struct {
 	log            func(string, ...interface{})
 	checkJobs      bool
 	pausedAsReady  bool
-	readyResources []*resource.Info
+	readyResources map[string]bool
 }
 
 // IsReady checks if v is ready. It supports checking readiness for pods,
@@ -100,10 +100,8 @@ func (c *ReadyChecker) IsReady(ctx context.Context, v *resource.Info) (bool, err
 	)
 
 	// Skip any resources previously marked as ready
-	for _, resource := range c.readyResources {
-		if resource == v {
-			return true, nil
-		}
+	if _, exists := c.readyResources[objectKey(v)]; exists {
+		return true, nil
 	}
 
 	switch value := AsVersioned(v).(type) {
@@ -433,4 +431,9 @@ func getPods(ctx context.Context, client kubernetes.Interface, namespace, select
 		LabelSelector: selector,
 	})
 	return list.Items, err
+}
+
+func objectKey(r *resource.Info) string {
+	gvk := r.Object.GetObjectKind().GroupVersionKind()
+	return fmt.Sprintf("%s/%s/%s/%s", gvk.GroupVersion().String(), gvk.Kind, r.Namespace, r.Name)
 }

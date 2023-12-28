@@ -52,12 +52,16 @@ func (w *waiter) waitForResources(created ResourceList) error {
 
 	return wait.PollUntilContextCancel(ctx, 2*time.Second, true, func(ctx context.Context) (bool, error) {
 		for _, v := range created {
+			if _, exists := w.c.readyResources[objectKey(v)]; exists {
+				continue
+			}
+
 			ready, err := w.c.IsReady(ctx, v)
 			if !ready || err != nil {
 				return false, err
 			}
 			if ready {
-				w.c.readyResources = append(w.c.readyResources, v)
+				w.c.readyResources[objectKey(v)] = true
 			}
 		}
 		return true, nil
@@ -73,17 +77,15 @@ func (w *waiter) waitForDeletedResources(deleted ResourceList) error {
 
 	return wait.PollUntilContextCancel(ctx, 2*time.Second, true, func(ctx context.Context) (bool, error) {
 		for _, v := range deleted {
-			for _, resource := range w.c.readyResources {
-				if resource == v {
-					continue
-				}
+			if _, exists := w.c.readyResources[objectKey(v)]; exists {
+				continue
 			}
 
 			err := v.Get()
 			if err == nil || !apierrors.IsNotFound(err) {
 				return false, err
 			}
-			w.c.readyResources = append(w.c.readyResources, v)
+			w.c.readyResources[objectKey(v)] = true
 			w.log("Deleted %s %s/%s", v.Mapping.GroupVersionKind.Kind, v.Namespace, v.Name)
 		}
 		return true, nil
