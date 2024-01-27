@@ -316,7 +316,13 @@ func (c *Client) WaitWithJobs(resources ResourceList, timeout time.Duration) err
 
 // WaitForDelete wait up to the given timeout for the specified resources to be deleted.
 func (c *Client) WaitForDelete(resources ResourceList, timeout time.Duration) error {
+	cs, err := c.getKubeClient()
+	if err != nil {
+		return err
+	}
+	checker := NewReadyChecker(cs, c.Log)
 	w := waiter{
+		c:       checker,
 		log:     c.Log,
 		timeout: timeout,
 	}
